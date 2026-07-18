@@ -1,0 +1,24 @@
+package utils
+
+import (
+	"fmt"
+	"os/exec"
+	"runtime"
+)
+
+// OpenBrowser 用系統預設瀏覽器開啟 url。
+func OpenBrowser(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("auth: open browser: %w", err)
+	}
+	return nil
+}
