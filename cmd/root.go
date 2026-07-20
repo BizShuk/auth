@@ -69,6 +69,8 @@ func (f *rootFlags) authOptions(extra ...sdkauth.Option) []sdkauth.Option {
 	opts := extra
 	if f.noBrowser {
 		opts = append(opts, sdkauth.WithManualCode(promptForCode))
+	} else {
+		opts = append(opts, sdkauth.WithBrowserOpener(utils.OpenBrowser))
 	}
 	return opts
 }

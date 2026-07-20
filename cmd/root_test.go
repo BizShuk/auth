@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	sdkauth "github.com/bizshuk/auth/model"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,6 +28,13 @@ func TestInstallMountsCredentialCommandsAndFlags(t *testing.T) {
 func TestInstallRejectsBadArguments(t *testing.T) {
 	assert.Error(t, Install(nil, "agentsdk"))
 	assert.Error(t, Install(&cobra.Command{}, "  "))
+}
+
+func TestAuthOptionsProvideDefaultBrowserOpener(t *testing.T) {
+	flags := &rootFlags{}
+	opts := sdkauth.NewOptions(flags.authOptions()...)
+
+	assert.NotNil(t, opts.OpenBrowser)
 }
 
 func TestStoreResolvesOverrideAndDefault(t *testing.T) {
