@@ -37,6 +37,13 @@ func TestAuthOptionsProvideDefaultBrowserOpener(t *testing.T) {
 	assert.NotNil(t, opts.OpenBrowser)
 }
 
+func TestAuthOptionsProvideDeviceCodePromptInNoBrowserMode(t *testing.T) {
+	flags := &rootFlags{noBrowser: true}
+	opts := sdkauth.NewOptions(flags.authOptions()...)
+
+	assert.NotNil(t, opts.ShowDeviceCode)
+}
+
 func TestStoreResolvesOverrideAndDefault(t *testing.T) {
 	override := t.TempDir()
 	flags := &rootFlags{appName: "agentsdk", authDir: override}

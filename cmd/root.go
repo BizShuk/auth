@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	sdkauth "github.com/bizshuk/auth/model"
+	"github.com/bizshuk/auth/svc"
 	utils "github.com/bizshuk/auth/utils"
 	"github.com/spf13/cobra"
 )
@@ -66,7 +67,9 @@ func (f *rootFlags) store() (*utils.FileStore, error) {
 
 // authOptions 依旗標組出 auth 套件的 options。--no-browser 時切到手動貼碼模式。
 func (f *rootFlags) authOptions(extra ...sdkauth.Option) []sdkauth.Option {
-	opts := extra
+	opts := append(extra, sdkauth.WithDeviceCodePrompt(func(value any) {
+		svc.PrintDeviceCode(value.(*svc.DeviceCode))
+	}))
 	if f.noBrowser {
 		opts = append(opts, sdkauth.WithManualCode(promptForCode))
 	} else {
