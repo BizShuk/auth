@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"github.com/bizshuk/auth/model"
-	"github.com/bizshuk/auth/utils"
 	"strings"
 )
 
@@ -78,10 +77,12 @@ func DefaultEnvironmentNames() map[string]string {
 	}
 }
 
-// Resolver selects, refreshes, and persists provider credentials: active.json
-// selection first, then alphabetic fallback, then environment API keys, with
-// expiry-triggered refresh persisted back through the store. It is the shared
-// mechanism behind the proxy request path and the runtime ModelProvider path.
+// Resolver selects, refreshes, and persists provider credentials. Precedence
+// is the application's explicit selection first (ActiveLookup, backed by its
+// own settings file), then alphabetic fallback, then environment API keys,
+// with expiry-triggered refresh persisted back through the store. It is the
+// shared mechanism behind the proxy request path and the runtime
+// ModelProvider path.
 type Resolver struct {
 	store            ResolverStore
 	authenticatorFor AuthenticatorFor
@@ -166,9 +167,6 @@ func (r *Resolver) resolveStored(providerFamily string) (*model.Credential, erro
 	// Names arrive sorted and a credential's file name is its Name(), so the
 	// first provider match is the alphabetic winner — no re-sort needed.
 	for _, name := range names {
-		if name == utils.ACTIVE_NAME {
-			continue // the selection file, not a credential
-		}
 		cred, err := r.store.Read(name)
 		if err != nil {
 			continue // one unreadable file must not hide the rest

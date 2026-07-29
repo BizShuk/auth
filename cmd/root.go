@@ -27,8 +27,8 @@ type rootFlags struct {
 }
 
 // Install 在 root 上註冊共用旗標並掛載全部憑證子指令。appName 決定預設
-// 憑證目錄 ~/.config/<appName>/data/auth（gosdk 目錄慣例，stdlib 實作，
-// 不引入 gosdk 依賴）。
+// 憑證目錄 ~/.config/<appName>/data/auth，也決定 `use` 把選擇寫到哪一份
+// settings.local.json —— 所以多個應用可以共用憑證目錄而各自選各自的。
 func Install(root *cobra.Command, appName string) error {
 	if root == nil {
 		return fmt.Errorf("auth cmd: root command is required")
@@ -70,12 +70,12 @@ func (f *rootFlags) store() (*credentialStore, error) {
 		dir = filepath.Join(home, ".config", f.appName, "data", "auth")
 	}
 	return file.NewStore[*sdkauth.Credential](dir,
-		file.WithDirPerm(0o700), file.WithFilePerm(0o600))
+		file.WithDirPerm(utils.AUTH_DIR_PERM), file.WithFilePerm(utils.AUTH_FILE_PERM))
 }
 
-// credentials reads every credential in the store, skipping the selection
-// file and anything that no longer parses — one corrupt file must not hide
-// the rest. Names come back sorted, so the result is too.
+// credentials reads every credential in the store, skipping anything that no
+// longer parses — one corrupt file must not hide the rest. Names come back
+// sorted, so the result is too.
 func (f *rootFlags) credentials() (*credentialStore, []*sdkauth.Credential, error) {
 	store, err := f.store()
 	if err != nil {
@@ -88,9 +88,6 @@ func (f *rootFlags) credentials() (*credentialStore, []*sdkauth.Credential, erro
 
 	creds := make([]*sdkauth.Credential, 0, len(names))
 	for _, name := range names {
-		if name == utils.ACTIVE_NAME {
-			continue // the selection file, not a credential
-		}
 		cred, err := store.Read(name)
 		if err != nil {
 			continue

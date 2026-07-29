@@ -4,14 +4,10 @@ import (
 	"context"
 	"errors"
 	"github.com/bizshuk/auth/model"
-	"github.com/bizshuk/auth/utils"
-	"os"
-	"path/filepath"
 	"sort"
 	"testing"
 	"time"
 
-	"github.com/bizshuk/gosdk/file"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -198,30 +194,4 @@ func TestResolverNilGuards(t *testing.T) {
 	var unavailableErr *UnavailableError
 	require.ErrorAs(t, err, &unavailableErr)
 	assert.Equal(t, "credential store is unavailable", unavailableErr.Message)
-}
-
-// Installs predating the move to settings still have active.json sitting in
-// the credential directory. It must never be reported as a credential: it
-// decodes into an empty Credential without error, since json.Unmarshal
-// ignores unknown fields, and would surface as a phantom blank-provider entry.
-func TestResolverSkipsLegacyActiveFile(t *testing.T) {
-	dir := t.TempDir()
-	store, err := file.NewStore[*model.Credential](dir,
-		file.WithDirPerm(0o700), file.WithFilePerm(0o600))
-	require.NoError(t, err)
-
-	cred := &model.Credential{Provider: "openai", Kind: model.KIND_API_KEY, APIKey: "stored"}
-	require.NoError(t, store.Write(cred.Name(), cred))
-	// A leftover selection file from before the move to settings.
-	require.NoError(t, os.WriteFile(
-		filepath.Join(dir, utils.ACTIVE_NAME+".json"),
-		[]byte(`{"anthropic":"anthropic_oauth"}`), utils.AUTH_FILE_PERM))
-
-	names, err := store.List()
-	require.NoError(t, err)
-	assert.Contains(t, names, utils.ACTIVE_NAME, "the file really is in the listing")
-
-	resolved, err := NewResolver(store, nil, nil, nil).Resolve(context.Background(), "openai")
-	require.NoError(t, err)
-	assert.Equal(t, "stored", resolved.APIKey)
 }
