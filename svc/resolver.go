@@ -5,18 +5,34 @@ import (
 	"fmt"
 	"github.com/bizshuk/auth/model"
 	"github.com/bizshuk/auth/utils"
-	"slices"
 	"strings"
 )
 
-// ResolverStore is the credential persistence surface Resolver needs;
-// *utils.FileStore satisfies it.
+// ResolverStore is the credential persistence surface Resolver needs. It is
+// deliberately shaped like gosdk/file.Store[*model.Credential], which
+// satisfies it as-is — the interface exists so this package keeps its
+// stdlib-only dependency set and tests can inject a stub, not to abstract
+// over a storage choice.
+//
+// List returns names, not credentials: a single unparseable file must not
+// break the whole listing, so the caller decides what to do per entry.
+// Names come back sorted, and a credential's file name is its Name(), so
+// that order is already the selection order.
 type ResolverStore interface {
-	Dir() string
-	Load(string) (*model.Credential, error)
-	List() ([]*model.Credential, error)
-	Save(*model.Credential) error
+	Read(name string) (*model.Credential, error)
+	List() ([]string, error)
+	Write(name string, cred *model.Credential) error
 }
+
+// ActiveLookup reports the credential name an application has selected for a
+// provider family, or false when it has selected none. auth/active.Lookup is
+// the settings-backed implementation.
+//
+// It is a func type for the same reason AuthenticatorFor and EnvLookup are:
+// the selection lives in the application's settings file, and reading that
+// means viper — a dependency this package does not take. The composition
+// root injects it.
+type ActiveLookup func(providerFamily string) (string, bool)
 
 // AuthenticatorFor returns the model.Authenticator able to refresh cred, typically
 // auth/provider.For. It is a func type so the mechanism layer stays free of
@@ -70,17 +86,22 @@ type Resolver struct {
 	store            ResolverStore
 	authenticatorFor AuthenticatorFor
 	lookupEnv        EnvLookup
+	lookupActive     ActiveLookup
 	environmentNames map[string]string
 }
 
 // NewResolver builds a Resolver over store. authenticatorFor enables expiry
-// refresh; lookupEnv enables the environment fallback. Either may be nil to
-// disable that behaviour.
-func NewResolver(store ResolverStore, authenticatorFor AuthenticatorFor, lookupEnv EnvLookup) *Resolver {
+// refresh; lookupEnv enables the environment fallback; lookupActive enables
+// the application's explicit selection. Any of them may be nil to disable
+// that behaviour — a nil lookupActive means selection falls straight to the
+// alphabetic scan, so a composition root that forgets it silently loses the
+// user's `auth use` choice.
+func NewResolver(store ResolverStore, authenticatorFor AuthenticatorFor, lookupEnv EnvLookup, lookupActive ActiveLookup) *Resolver {
 	return &Resolver{
 		store:            store,
 		authenticatorFor: authenticatorFor,
 		lookupEnv:        lookupEnv,
+		lookupActive:     lookupActive,
 		environmentNames: DefaultEnvironmentNames(),
 	}
 }
@@ -118,13 +139,17 @@ func (r *Resolver) Resolve(ctx context.Context, providerFamily string) (*model.C
 	return r.refresh(ctx, providerFamily, cred)
 }
 
-func (r *Resolver) resolveStored(providerFamily string) (*model.Credential, error) {
-	active, err := utils.LoadActiveNames(r.store.Dir())
-	if err != nil {
-		return nil, unavailable("load active credential selection", err)
+// activeName reports the application's explicit selection for providerFamily.
+func (r *Resolver) activeName(providerFamily string) (string, bool) {
+	if r.lookupActive == nil {
+		return "", false
 	}
-	if name, ok := active[providerFamily]; ok {
-		cred, err := r.store.Load(name)
+	return r.lookupActive(providerFamily)
+}
+
+func (r *Resolver) resolveStored(providerFamily string) (*model.Credential, error) {
+	if name, ok := r.activeName(providerFamily); ok {
+		cred, err := r.store.Read(name)
 		if err != nil {
 			return nil, unavailable(fmt.Sprintf("load active credential for provider %q", providerFamily), err)
 		}
@@ -134,23 +159,25 @@ func (r *Resolver) resolveStored(providerFamily string) (*model.Credential, erro
 		return cred, nil
 	}
 
-	creds, err := r.store.List()
+	names, err := r.store.List()
 	if err != nil {
 		return nil, unavailable(fmt.Sprintf("list credentials for provider %q", providerFamily), err)
 	}
-	matching := make([]*model.Credential, 0, len(creds))
-	for _, cred := range creds {
+	// Names arrive sorted and a credential's file name is its Name(), so the
+	// first provider match is the alphabetic winner — no re-sort needed.
+	for _, name := range names {
+		if name == utils.ACTIVE_NAME {
+			continue // the selection file, not a credential
+		}
+		cred, err := r.store.Read(name)
+		if err != nil {
+			continue // one unreadable file must not hide the rest
+		}
 		if cred != nil && strings.EqualFold(cred.Provider, providerFamily) {
-			matching = append(matching, cred)
+			return cred, nil
 		}
 	}
-	slices.SortFunc(matching, func(left, right *model.Credential) int {
-		return strings.Compare(left.Name(), right.Name())
-	})
-	if len(matching) == 0 {
-		return nil, nil
-	}
-	return matching[0], nil
+	return nil, nil
 }
 
 func (r *Resolver) resolveEnvironment(providerFamily string) *model.Credential {
@@ -193,7 +220,7 @@ func (r *Resolver) refresh(ctx context.Context, providerFamily string, cred *mod
 	if !strings.EqualFold(refreshed.Provider, providerFamily) {
 		return nil, unavailable(fmt.Sprintf("refreshed credential provider %q does not match %q", refreshed.Provider, providerFamily), nil)
 	}
-	if err := r.store.Save(refreshed); err != nil {
+	if err := r.store.Write(refreshed.Name(), refreshed); err != nil {
 		return nil, unavailable(fmt.Sprintf("save refreshed credential for provider %q", providerFamily), err)
 	}
 	return refreshed, nil

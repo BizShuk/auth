@@ -20,7 +20,7 @@ func newRefreshCmd(root *rootFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			cred, err := store.Load(args[0])
+			cred, err := store.Read(args[0])
 			if err != nil {
 				return err
 			}
@@ -33,7 +33,7 @@ func newRefreshCmd(root *rootFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := store.Save(refreshed); err != nil {
+			if err := store.Write(refreshed.Name(), refreshed); err != nil {
 				return err
 			}
 

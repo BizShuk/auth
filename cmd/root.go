@@ -15,6 +15,7 @@ import (
 	sdkauth "github.com/bizshuk/auth/model"
 	"github.com/bizshuk/auth/svc"
 	utils "github.com/bizshuk/auth/utils"
+	"github.com/bizshuk/gosdk/file"
 	"github.com/spf13/cobra"
 )
 
@@ -53,16 +54,50 @@ func Install(root *cobra.Command, appName string) error {
 	return nil
 }
 
+// credentialStore is the on-disk credential store: one JSON file per
+// credential, keyed by Credential.Name(). Credentials carry long-lived
+// secrets, so the directory and every file are locked to owner-only.
+type credentialStore = file.Store[*sdkauth.Credential]
+
 // store 解析出憑證目錄:--auth-dir 優先,否則 ~/.config/<appName>/data/auth。
-func (f *rootFlags) store() (*utils.FileStore, error) {
-	if f.authDir != "" {
-		return utils.NewFileStore(f.authDir)
+func (f *rootFlags) store() (*credentialStore, error) {
+	dir := f.authDir
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("resolve home directory: %w", err)
+		}
+		dir = filepath.Join(home, ".config", f.appName, "data", "auth")
 	}
-	home, err := os.UserHomeDir()
+	return file.NewStore[*sdkauth.Credential](dir,
+		file.WithDirPerm(0o700), file.WithFilePerm(0o600))
+}
+
+// credentials reads every credential in the store, skipping the selection
+// file and anything that no longer parses — one corrupt file must not hide
+// the rest. Names come back sorted, so the result is too.
+func (f *rootFlags) credentials() (*credentialStore, []*sdkauth.Credential, error) {
+	store, err := f.store()
 	if err != nil {
-		return nil, fmt.Errorf("resolve home directory: %w", err)
+		return nil, nil, err
 	}
-	return utils.NewFileStore(filepath.Join(home, ".config", f.appName, "data", "auth"))
+	names, err := store.List()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	creds := make([]*sdkauth.Credential, 0, len(names))
+	for _, name := range names {
+		if name == utils.ACTIVE_NAME {
+			continue // the selection file, not a credential
+		}
+		cred, err := store.Read(name)
+		if err != nil {
+			continue
+		}
+		creds = append(creds, cred)
+	}
+	return store, creds, nil
 }
 
 // authOptions 依旗標組出 auth 套件的 options。--no-browser 時切到手動貼碼模式。
@@ -99,7 +134,7 @@ func saveAndReport(f *rootFlags, cred *sdkauth.Credential) error {
 	if err != nil {
 		return err
 	}
-	if err := store.Save(cred); err != nil {
+	if err := store.Write(cred.Name(), cred); err != nil {
 		return err
 	}
 

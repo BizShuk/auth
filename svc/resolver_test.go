@@ -7,9 +7,11 @@ import (
 	"github.com/bizshuk/auth/utils"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
+	"github.com/bizshuk/gosdk/file"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -32,7 +34,7 @@ func newResolverStoreStub(t *testing.T, creds ...*model.Credential) *resolverSto
 
 func (s *resolverStoreStub) Dir() string { return s.dir }
 
-func (s *resolverStoreStub) Load(name string) (*model.Credential, error) {
+func (s *resolverStoreStub) Read(name string) (*model.Credential, error) {
 	cred, ok := s.creds[name]
 	if !ok {
 		return nil, errors.New("not found: " + name)
@@ -40,20 +42,24 @@ func (s *resolverStoreStub) Load(name string) (*model.Credential, error) {
 	return cred, nil
 }
 
-func (s *resolverStoreStub) List() ([]*model.Credential, error) {
-	out := make([]*model.Credential, 0, len(s.creds))
-	for _, cred := range s.creds {
-		out = append(out, cred)
+// List mirrors gosdk/file.Store: sorted names, not credentials. The sort is
+// load-bearing — Resolver takes the first provider match as the alphabetic
+// winner instead of re-sorting.
+func (s *resolverStoreStub) List() ([]string, error) {
+	out := make([]string, 0, len(s.creds))
+	for name := range s.creds {
+		out = append(out, name)
 	}
+	sort.Strings(out)
 	return out, nil
 }
 
-func (s *resolverStoreStub) Save(cred *model.Credential) error {
+func (s *resolverStoreStub) Write(name string, cred *model.Credential) error {
 	if s.saveErr != nil {
 		return s.saveErr
 	}
 	s.saved = append(s.saved, cred)
-	s.creds[cred.Name()] = cred
+	s.creds[name] = cred
 	return nil
 }
 
@@ -86,7 +92,7 @@ func TestResolverSelectionOrder(t *testing.T) {
 	tests := []struct {
 		name       string
 		store      *resolverStoreStub
-		active     string
+		active     map[string]string
 		env        map[string]string
 		provider   string
 		wantAPIKey string
@@ -95,7 +101,7 @@ func TestResolverSelectionOrder(t *testing.T) {
 		{
 			name:       "active selection wins over alphabetic",
 			store:      newResolverStoreStub(t, valid, &model.Credential{Provider: "openai", Kind: model.KIND_API_KEY, APIKey: "aaa", Account: "aaa"}),
-			active:     `{"openai":"` + valid.Name() + `"}`,
+			active:     map[string]string{"openai": valid.Name()},
 			provider:   "openai",
 			wantAPIKey: "stored",
 		},
@@ -136,14 +142,15 @@ func TestResolverSelectionOrder(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.active != "" {
-				require.NoError(t, os.WriteFile(filepath.Join(tc.store.Dir(), utils.ACTIVE_FILE_NAME), []byte(tc.active), 0o600))
-			}
 			lookup := func(key string) (string, bool) {
 				value, ok := tc.env[key]
 				return value, ok
 			}
-			resolver := NewResolver(tc.store, nil, lookup)
+			active := func(family string) (string, bool) {
+				name, ok := tc.active[family]
+				return name, ok
+			}
+			resolver := NewResolver(tc.store, nil, lookup, active)
 
 			cred, err := resolver.Resolve(context.Background(), tc.provider)
 			if tc.wantErr != "" {
@@ -173,7 +180,7 @@ func TestResolverRefreshesExpiredAndPersists(t *testing.T) {
 	authenticator := &refreshStub{refreshed: rotated}
 	resolver := NewResolver(store, func(*model.Credential) (model.Authenticator, error) {
 		return authenticator, nil
-	}, nil)
+	}, nil, nil)
 
 	type ctxKey struct{}
 	ctx := context.WithValue(context.Background(), ctxKey{}, "request")
@@ -193,30 +200,28 @@ func TestResolverNilGuards(t *testing.T) {
 	assert.Equal(t, "credential store is unavailable", unavailableErr.Message)
 }
 
-func TestActiveNamesRoundTrip(t *testing.T) {
+// Installs predating the move to settings still have active.json sitting in
+// the credential directory. It must never be reported as a credential: it
+// decodes into an empty Credential without error, since json.Unmarshal
+// ignores unknown fields, and would surface as a phantom blank-provider entry.
+func TestResolverSkipsLegacyActiveFile(t *testing.T) {
 	dir := t.TempDir()
-
-	names, err := utils.LoadActiveNames(dir)
+	store, err := file.NewStore[*model.Credential](dir,
+		file.WithDirPerm(0o700), file.WithFilePerm(0o600))
 	require.NoError(t, err)
-	assert.Empty(t, names, "missing file must read as empty selection")
 
-	require.NoError(t, utils.SaveActiveName(dir, "openai", "openai-work"))
-	require.NoError(t, utils.SaveActiveName(dir, "anthropic", "anthropic-personal"))
+	cred := &model.Credential{Provider: "openai", Kind: model.KIND_API_KEY, APIKey: "stored"}
+	require.NoError(t, store.Write(cred.Name(), cred))
+	// A leftover selection file from before the move to settings.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, utils.ACTIVE_NAME+".json"),
+		[]byte(`{"anthropic":"anthropic_oauth"}`), utils.AUTH_FILE_PERM))
 
-	names, err = utils.LoadActiveNames(dir)
+	names, err := store.List()
 	require.NoError(t, err)
-	assert.Equal(t, map[string]string{
-		"openai":    "openai-work",
-		"anthropic": "anthropic-personal",
-	}, names)
+	assert.Contains(t, names, utils.ACTIVE_NAME, "the file really is in the listing")
 
-	info, err := os.Stat(filepath.Join(dir, utils.ACTIVE_FILE_NAME))
+	resolved, err := NewResolver(store, nil, nil, nil).Resolve(context.Background(), "openai")
 	require.NoError(t, err)
-	assert.Equal(t, utils.AUTH_FILE_PERM, info.Mode().Perm(), "active.json must keep 0600")
-
-	require.NoError(t, os.WriteFile(filepath.Join(dir, utils.ACTIVE_FILE_NAME), []byte(`{"broken":`), 0o600))
-	_, err = utils.LoadActiveNames(dir)
-	assert.ErrorContains(t, err, "parse active credential selection")
-	assert.ErrorContains(t, utils.SaveActiveName(dir, "openai", "x"), "parse active credential selection",
-		"corrupt selection must surface instead of being silently replaced")
+	assert.Equal(t, "stored", resolved.APIKey)
 }

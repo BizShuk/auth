@@ -17,11 +17,7 @@ func newListCmd(root *rootFlags) *cobra.Command {
 		Short: "List stored credentials",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			store, err := root.store()
-			if err != nil {
-				return err
-			}
-			creds, err := store.List()
+			store, creds, err := root.credentials()
 			if err != nil {
 				return err
 			}

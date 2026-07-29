@@ -6,7 +6,6 @@ import (
 
 	sdkauth "github.com/bizshuk/auth/model"
 	"github.com/bizshuk/auth/provider"
-	utils "github.com/bizshuk/auth/utils"
 	"github.com/spf13/cobra"
 )
 
@@ -30,23 +29,18 @@ func newVerifyCmd(root *rootFlags) *cobra.Command {
   auth-cli verify --all`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := root.store()
+			store, targets, err := root.credentials()
 			if err != nil {
 				return err
 			}
 
-			var targets []*sdkauth.Credential
 			switch {
 			case all:
-				targets, err = store.List()
-				if err != nil {
-					return err
-				}
 				if len(targets) == 0 {
 					return fmt.Errorf("no credentials in %s", store.Dir())
 				}
 			case len(args) == 1:
-				cred, err := store.Load(args[0])
+				cred, err := store.Read(args[0])
 				if err != nil {
 					return err
 				}
@@ -75,7 +69,7 @@ func newVerifyCmd(root *rootFlags) *cobra.Command {
 }
 
 // verifyOne 驗證一份憑證,並在 provider 輪替 token 時把新憑證寫回磁碟。
-func verifyOne(ctx context.Context, store *utils.FileStore, cred *sdkauth.Credential) error {
+func verifyOne(ctx context.Context, store *credentialStore, cred *sdkauth.Credential) error {
 	authenticator, err := provider.For(cred)
 	if err != nil {
 		return err
@@ -93,7 +87,7 @@ func verifyOne(ctx context.Context, store *utils.FileStore, cred *sdkauth.Creden
 	// OAuth / service account 的驗證會換到新 token — 不存回去的話,下一次
 	// 用的還是舊的 (OpenAI 甚至會讓舊的 refresh token 立刻失效)。
 	if res.Credential != nil {
-		if err := store.Save(res.Credential); err != nil {
+		if err := store.Write(res.Credential.Name(), res.Credential); err != nil {
 			return fmt.Errorf("verified, but failed to persist the rotated credential: %w", err)
 		}
 		fmt.Printf("   rotated: credential updated on disk\n")

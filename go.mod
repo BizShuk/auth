@@ -3,6 +3,7 @@ module github.com/bizshuk/auth
 go 1.26.0
 
 require (
+	github.com/bizshuk/gosdk v1.2.9
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.20.1
 	github.com/stretchr/testify v1.11.1
@@ -12,6 +13,7 @@ require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
+	github.com/gocarina/gocsv v0.0.0-20260523204920-c264028e67ea // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
