@@ -1,0 +1,14 @@
+{
+  "name": "auth",
+  "version": "0.0.0",
+  "private": true,
+  "description": "LLM provider 認證模組 (authentication)：login / refresh / verify，同時驅動 auth CLI 與 Go SDK",
+  "scripts": {
+    "dev": "go run .",
+    "test": "go test ./...",
+    "build": "go build -o bin/auth .",
+    "deploy": "go install .",
+    "lint": "gofmt -l . && go vet ./...",
+    "clean": "rm -rf bin"
+  }
+}
