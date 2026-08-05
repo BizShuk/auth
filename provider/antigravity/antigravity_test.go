@@ -195,15 +195,27 @@ func TestVerifyFailsWithoutRefreshToken(t *testing.T) {
 	assert.Empty(t, google.tokenRequests)
 }
 
-// Client 憑證是從 .env / shell 來的;Login 必須在憑證缺失時早一步失敗,
-// 而不是默默送出一個沒有 client_id 的請求給 Google。
-func TestLoginFailsWithoutClientCredentials(t *testing.T) {
+// 環境變數是覆寫,不是唯一來源:沒設時要用內建的 installed-app 憑證登入,
+// 而不是送出一個沒有 client_id 的請求給 Google。
+func TestLoginUsesBuiltInClientCredentials(t *testing.T) {
+	google := newGoogleServer(t, "google-access")
 	t.Setenv(antigravity.ENV_CLIENT_ID, "")
 	t.Setenv(antigravity.ENV_CLIENT_SECRET, "")
 
-	a := antigravity.NewOAuth(model.WithLoginTimeout(time.Second))
+	a := antigravity.NewOAuth(google.options(t,
+		model.WithBrowserOpener(authtest.FollowRedirect(t, "code-1", nil)))...)
+
 	_, err := a.Login(context.Background())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), antigravity.ENV_CLIENT_ID)
-	assert.Contains(t, err.Error(), antigravity.ENV_CLIENT_SECRET)
+	require.NoError(t, err)
+
+	require.Len(t, google.tokenRequests, 1)
+	sent := google.tokenRequests[0]
+	assert.Equal(t, antigravity.CLIENT_ID, sent.Get("client_id"))
+	assert.Equal(t, antigravity.CLIENT_SECRET, sent.Get("client_secret"))
+}
+
+// 內建的 redirect URI 必須指回登記的 callback port。
+func TestRedirectURIUsesCallbackPort(t *testing.T) {
+	assert.Equal(t, "51121", antigravity.CALLBACK_PORT)
+	assert.Equal(t, "http://localhost:51121/oauth-callback", antigravity.REDIRECT_URI)
 }

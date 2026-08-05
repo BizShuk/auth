@@ -28,7 +28,17 @@ import (
 // PROVIDER 是憑證裡記的 provider 名稱。
 const PROVIDER = "antigravity"
 
-// Antigravity 的 installed-app client 憑證不入庫,從 viper 讀。
+// Antigravity 的 installed-app client 憑證。CLIENT_ID / CLIENT_SECRET 是
+// Antigravity 公開發行的 installed-app 憑證 — 與 anthropic / openai / xai 的
+// CLIENT_ID 同一性質:它就寫在每個安裝出去的 client 裡,真正的保護來自
+// redirect_uri 必須指回 localhost (見 package docstring)。
+const (
+	CLIENT_ID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+	CLIENT_SECRET = "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"
+)
+
+// 需要換一組 client 時(自建 GCP OAuth client、或憑證被輪替)以環境變數覆寫,
+// 空值即沿用上面的預設值。
 //
 // 載入路徑 (viper 的標準 precedence):
 //  1. shell:`export ANTIGRAVITY_CLIENT_ID=...`
@@ -43,11 +53,13 @@ const (
 )
 
 // Google OAuth2 端點與 Antigravity 的 installed-app redirect URI。
+// CALLBACK_PORT 必須與該 client 在 GCP 上登記的 redirect URI 一致。
 const (
-	AUTH_URL     = "https://accounts.google.com/o/oauth2/v2/auth"
-	TOKEN_URL    = "https://oauth2.googleapis.com/token"
-	USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
-	REDIRECT_URI = "http://localhost:51121/oauth-callback"
+	AUTH_URL      = "https://accounts.google.com/o/oauth2/v2/auth"
+	TOKEN_URL     = "https://oauth2.googleapis.com/token"
+	USERINFO_URL  = "https://www.googleapis.com/oauth2/v2/userinfo"
+	CALLBACK_PORT = "51121"
+	REDIRECT_URI  = "http://localhost:" + CALLBACK_PORT + "/oauth-callback"
 )
 
 // init 把兩個 client 憑證的 viper key 綁到對應的環境變數。
@@ -73,15 +85,16 @@ type OAuth struct {
 	client *svc.OAuthClient
 }
 
-// NewOAuth 建立 authenticator。client_id / client_secret 從 viper 讀;
-// .env 載入由 gosdk/config.Default() 負責 (見 package docstring)。
+// NewOAuth 建立 authenticator。client_id / client_secret 預設用內建的
+// installed-app 憑證,環境變數有值時覆寫;.env 載入由 gosdk/config.Default()
+// 負責 (見 package docstring)。
 func NewOAuth(opts ...model.Option) *OAuth {
 	o := model.NewOptions(opts...)
 	cfg := svc.OAuthConfig{
 		AuthURL:      model.Pick(o.AuthURL, AUTH_URL),
 		TokenURL:     model.Pick(o.TokenURL, TOKEN_URL),
-		ClientID:     viper.GetString(ENV_CLIENT_ID),
-		ClientSecret: viper.GetString(ENV_CLIENT_SECRET),
+		ClientID:     model.Pick(viper.GetString(ENV_CLIENT_ID), CLIENT_ID),
+		ClientSecret: model.Pick(viper.GetString(ENV_CLIENT_SECRET), CLIENT_SECRET),
 		RedirectURI:  model.Pick(o.RedirectURI, REDIRECT_URI),
 		Scopes:       SCOPES,
 		UsePKCE:      false,
@@ -101,11 +114,6 @@ func (a *OAuth) Kind() model.Kind { return model.KIND_OAUTH }
 
 // Login 跑完整的瀏覽器授權流程,再打 userinfo 補上帳號 email。
 func (a *OAuth) Login(ctx context.Context) (*model.Credential, error) {
-	if a.client.Config().ClientID == "" || a.client.Config().ClientSecret == "" {
-		return nil, fmt.Errorf("antigravity: %s and %s must be set (load from .env or export in shell)",
-			ENV_CLIENT_ID, ENV_CLIENT_SECRET)
-	}
-
 	token, err := svc.RunBrowserLogin(ctx, a.client, a.opts)
 	if err != nil {
 		return nil, err
