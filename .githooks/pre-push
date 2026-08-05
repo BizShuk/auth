@@ -1,0 +1,170 @@
+#!/bin/bash
+#
+# pre-push: 自動建立並推送 release tag。
+#
+# 每次把新 commit 推上 release branch，就從下列候選取最高版本，打在
+# 即將送出的 commit 上，並直接推到 remote：
+#
+#   - 目前最高的 v<major>.<minor>.<patch> tag 的下一個 patch。
+#   - package.json 的 version（若存在）。
+#   - .claude-plugin/plugin.json 的 version（若存在）。
+#
+# Manifest 只讀不寫；版本必須是不含 prerelease 或 build metadata 的
+# <major>.<minor>.<patch>。
+#
+# 兩個違反直覺但實測驗證過的設計：
+#
+#   1. tag 由本 hook 自己 push。
+#      git 在呼叫 pre-push 之前就決定好這次要傳哪些 ref，所以 hook 當下
+#      建立的 tag 不會被同一次 push 帶走 —— 即使設了 push.followTags 也
+#      一樣，它會等到「下一次」push 才送出。hook 自行執行
+#      `git push <remote> refs/tags/<tag>` 才會即時同步。
+#
+#   2. 一定要 annotated tag（git tag -a）。
+#      `git push --follow-tags` 只推 annotated tag，lightweight 的會被
+#      靜默忽略。
+#
+# 遞迴防護：hook 自己那次 tag push 會再次觸發本 hook，但 local_ref 是
+# refs/tags/* 而非 refs/heads/*，會在第一個 case 就被跳過。
+#
+# 契約：git 從 stdin 餵 <local_ref> <local_sha> <remote_ref> <remote_sha>，
+#       一行一個 ref；args 是 <remote-name> <remote-url>。
+#       本 hook 永遠 exit 0，不 reject push。
+
+set -uo pipefail
+
+readonly TAG_PREFIX="v"
+readonly TAG_GLOB="v[0-9]*"
+readonly PACKAGE_FILE="package.json"
+readonly PLUGIN_FILE=".claude-plugin/plugin.json"
+
+# 只有推這個 branch 才打 release tag。feature branch 不該產生 release tag，
+# 尤其這個 tag 會被立刻推上公開 remote。
+readonly RELEASE_BRANCH="master"
+
+note() { echo "pre-push: $1" >&2; }
+
+# 只接受 stable SemVer 核心版本；數字欄位除了 0 以外不得有前導零。
+is_version() {
+	[[ "$1" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+}
+
+# version_greater_than 以數字比較 major、minor、patch，不依賴 sort 的
+# 平台差異。相等時回傳 false。
+version_greater_than() {
+	local left_major left_minor left_patch right_major right_minor right_patch
+	IFS=. read -r left_major left_minor left_patch <<<"$1"
+	IFS=. read -r right_major right_minor right_patch <<<"$2"
+
+	if ((10#${left_major} != 10#${right_major})); then
+		((10#${left_major} > 10#${right_major}))
+		return
+	fi
+	if ((10#${left_minor} != 10#${right_minor})); then
+		((10#${left_minor} > 10#${right_minor}))
+		return
+	fi
+	((10#${left_patch} > 10#${right_patch}))
+}
+
+highest_tag_version() {
+	local tag version highest="0.0.0"
+	while IFS= read -r tag; do
+		version="${tag#"${TAG_PREFIX}"}"
+		is_version "$version" || continue
+		if version_greater_than "$version" "$highest"; then
+			highest="$version"
+		fi
+	done < <(git tag -l "$TAG_GLOB")
+	echo "$highest"
+}
+
+next_patch_version() {
+	local version major minor patch
+	version="$1"
+	is_version "$version" || return 1
+	IFS=. read -r major minor patch <<<"$version"
+	echo "$((10#${major})).$((10#${minor})).$((10#${patch} + 1))"
+}
+
+manifest_version() {
+	local file="$1" version
+	version="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -1)"
+	if ! is_version "$version"; then
+		note "${file} version '${version:-（空）}' 不是 major.minor.patch，忽略"
+		return 1
+	fi
+	echo "$version"
+}
+
+# next_release_tag 以「現存最高 tag 的下一個 patch」為下限，再與
+# 可用 manifest 版本取最大值。用最高 tag 而非 git describe 的「最近可達
+# tag」，避免分支情境產生較低或撞名的版本號。
+next_release_tag() {
+	local highest candidate selected manifest
+	highest="$(highest_tag_version)"
+	selected="$(next_patch_version "$highest")" || return 1
+
+	for manifest in "$PACKAGE_FILE" "$PLUGIN_FILE"; do
+		[[ -f "$manifest" ]] || continue
+		if candidate="$(manifest_version "$manifest")"; then
+			if version_greater_than "$candidate" "$selected"; then
+				selected="$candidate"
+			fi
+		fi
+	done
+
+	echo "${TAG_PREFIX}${selected}"
+}
+
+remote="${1:-origin}"
+
+while read -r local_ref local_sha _remote_ref remote_sha; do
+	# 只處理 branch push。tag push（含本 hook 自己推的那次）由此跳過，
+	# 這同時就是遞迴防護。
+	case "$local_ref" in
+	refs/heads/*) ;;
+	*) continue ;;
+	esac
+
+	if [[ "${local_ref#refs/heads/}" != "$RELEASE_BRANCH" ]]; then
+		continue
+	fi
+
+	# local 全 0 = 刪除 ref，沒有 commit 可 tag。
+	if [[ "$local_sha" =~ ^0+$ ]]; then
+		continue
+	fi
+
+	# remote 非全 0（既有 branch）時，確認這次真的帶了新 commit；
+	# remote 全 0 代表新 branch，一律視為有內容。
+	if [[ ! "$remote_sha" =~ ^0+$ ]]; then
+		if ! git rev-list "${remote_sha}..${local_sha}" | grep -q .; then
+			continue
+		fi
+	fi
+
+	if ! tag="$(next_release_tag)"; then
+		note "版本候選無法解析，跳過 auto-tag"
+		continue
+	fi
+
+	if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+		note "tag ${tag} 已存在，跳過 auto-tag"
+		continue
+	fi
+
+	if ! git tag -a "$tag" -m "release ${tag}" "$local_sha"; then
+		note "建立 tag ${tag} 失敗，跳過"
+		continue
+	fi
+	note "建立 tag ${tag} 於 ${local_sha:0:7}"
+
+	if git push --quiet "$remote" "refs/tags/${tag}"; then
+		note "已推送 ${tag} 至 ${remote}"
+	else
+		note "推送 ${tag} 失敗；tag 留在本地，可稍後手動 git push ${remote} ${tag}"
+	fi
+done
+
+exit 0
