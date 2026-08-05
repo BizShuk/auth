@@ -139,6 +139,12 @@ func saveAndReport(f *rootFlags, cred *sdkauth.Credential) error {
 	if cred.Account != "" {
 		fmt.Printf("   account:   %s\n", cred.Account)
 	}
+	// project 是登入時一併解析出來的帳號屬性 (vertex 從 service account 讀,
+	// antigravity 打 loadCodeAssist 拿)。印出來讓「有沒有拿到」當場可見 —
+	// 拿不到並不會讓登入失敗,少了這行就只能等到推論被拒才發現。
+	if cred.ProjectID != "" {
+		fmt.Printf("   project:   %s\n", cred.ProjectID)
+	}
 	if !cred.ExpiresAt.IsZero() {
 		fmt.Printf("   expires:   %s\n", cred.ExpiresAt.Format("2006-01-02 15:04:05 MST"))
 	}

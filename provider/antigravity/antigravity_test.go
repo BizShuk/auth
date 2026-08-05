@@ -2,6 +2,7 @@ package antigravity_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -23,6 +24,13 @@ type googleServer struct {
 
 	tokenRequests []url.Values
 	userinfoCalls int
+
+	// project 是 loadCodeAssist 要回的值;空字串模擬尚未開通的帳號。
+	project        any
+	projectCalls   int
+	projectHeaders http.Header
+	projectRequest int
+	projectMode    int
 }
 
 // 測試 fixture:模擬 Antigravity 的 installed-app client 憑證。NewOAuth
@@ -37,7 +45,7 @@ func newGoogleServer(t *testing.T, validToken string) *googleServer {
 	t.Helper()
 	t.Setenv(antigravity.ENV_CLIENT_ID, testClientID)
 	t.Setenv(antigravity.ENV_CLIENT_SECRET, testClientSecret)
-	g := &googleServer{validToken: validToken}
+	g := &googleServer{validToken: validToken, project: "projects/demo"}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +65,36 @@ func newGoogleServer(t *testing.T, validToken string) *googleServer {
 			return
 		}
 		authtest.WriteJSON(w, http.StatusOK, map[string]any{"email": "dev@example.com"})
+	})
+
+	mux.HandleFunc(antigravity.LOAD_CODE_ASSIST_PATH, func(w http.ResponseWriter, r *http.Request) {
+		g.projectCalls++
+		if r.Header.Get("Authorization") != "Bearer "+g.validToken {
+			authtest.WriteJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid_token"})
+			return
+		}
+		g.projectHeaders = r.Header.Clone()
+		// 真實 gateway 少了 client 身分標頭時`不會報錯` — 它照樣回 200,
+		// 只是整包不含 cloudaicompanionProject。fake 必須複製這個行為,
+		// 否則測試會在真實環境失敗的情況下通過。
+		if r.Header.Get("X-Client-Name") == "" || r.Header.Get("x-goog-api-client") == "" {
+			authtest.WriteJSON(w, http.StatusOK, map[string]any{
+				"allowedTiers": []any{map[string]any{"id": "standard-tier"}},
+			})
+			return
+		}
+		var body struct {
+			Metadata struct {
+				IDEType int `json:"ideType"`
+			} `json:"metadata"`
+			Mode int `json:"mode"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		g.projectRequest = body.Metadata.IDEType
+		g.projectMode = body.Mode
+		authtest.WriteJSON(w, http.StatusOK, map[string]any{
+			"cloudaicompanionProject": g.project,
+		})
 	})
 
 	g.server = httptest.NewServer(mux)
@@ -218,4 +256,71 @@ func TestLoginUsesBuiltInClientCredentials(t *testing.T) {
 func TestRedirectURIUsesCallbackPort(t *testing.T) {
 	assert.Equal(t, "51121", antigravity.CALLBACK_PORT)
 	assert.Equal(t, "http://localhost:51121/oauth-callback", antigravity.REDIRECT_URI)
+}
+
+// project 是帳號開通的產物而不是推論參數,所以在登入時查一次寫進憑證 —
+// 呼叫端因此不必在每次推論請求前自己解析。
+func TestLoginFetchesCloudCodeProject(t *testing.T) {
+	google := newGoogleServer(t, "google-access")
+
+	a := antigravity.NewOAuth(google.options(t,
+		model.WithBrowserOpener(authtest.FollowRedirect(t, "code-1", nil)))...)
+
+	cred, err := a.Login(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, "projects/demo", cred.ProjectID)
+	assert.Equal(t, 1, google.projectCalls, "登入查一次就夠,之後該值固定不變")
+	assert.Equal(t, antigravity.IDE_TYPE_ANTIGRAVITY, google.projectRequest,
+		"gateway 以數字讀 ideType,送名稱會被拒")
+	assert.Equal(t, antigravity.LOAD_CODE_ASSIST_MODE, google.projectMode)
+}
+
+// 開通中的帳號會用帶 id 的物件回這個欄位,而不是字串。
+func TestLoginAcceptsObjectShapedProject(t *testing.T) {
+	google := newGoogleServer(t, "google-access")
+	google.project = map[string]any{"id": "projects/nested"}
+
+	a := antigravity.NewOAuth(google.options(t,
+		model.WithBrowserOpener(authtest.FollowRedirect(t, "code-1", nil)))...)
+
+	cred, err := a.Login(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "projects/nested", cred.ProjectID)
+}
+
+// 帳號還沒開通 project 是正常的首次狀態 — token 是有效的,登入不該失敗。
+func TestLoginSurvivesMissingProject(t *testing.T) {
+	google := newGoogleServer(t, "google-access")
+	google.project = ""
+
+	a := antigravity.NewOAuth(google.options(t,
+		model.WithBrowserOpener(authtest.FollowRedirect(t, "code-1", nil)))...)
+
+	cred, err := a.Login(context.Background())
+	require.NoError(t, err)
+
+	assert.Empty(t, cred.ProjectID)
+	assert.Equal(t, "google-access", cred.AccessToken, "拿不到 project 不影響 token")
+	assert.Equal(t, "dev@example.com", cred.Account)
+}
+
+// 少了 client 身分標頭,gateway 回的 200 裡就沒有 cloudaicompanionProject —
+// 沒有任何錯誤訊號,project 只是靜靜地拿不到。這是實測踩到的失敗形式,
+// 所以標頭必須被釘住。
+func TestLoginSendsClientIdentityHeadersToLoadCodeAssist(t *testing.T) {
+	google := newGoogleServer(t, "google-access")
+
+	a := antigravity.NewOAuth(google.options(t,
+		model.WithBrowserOpener(authtest.FollowRedirect(t, "code-1", nil)))...)
+
+	cred, err := a.Login(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "projects/demo", cred.ProjectID, "標頭齊全時才拿得到 project")
+
+	h := google.projectHeaders
+	assert.Equal(t, antigravity.CLIENT_NAME, h.Get("X-Client-Name"))
+	assert.Equal(t, antigravity.CLIENT_VERSION, h.Get("X-Client-Version"))
+	assert.Equal(t, antigravity.GOOG_API_CLIENT, h.Get("x-goog-api-client"))
+	assert.Contains(t, h.Get("User-Agent"), antigravity.CLIENT_NAME+"/"+antigravity.CLIENT_VERSION)
 }

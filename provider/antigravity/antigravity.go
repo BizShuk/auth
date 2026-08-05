@@ -6,10 +6,12 @@
 //  1. 帶 client_secret,不走 PKCE — Google 的 installed-app client 是這樣設計的,
 //     secret 是公開的 (它就寫在每個安裝出去的 client 裡),真正的保護來自
 //     redirect_uri 必須指回 localhost。
-//  2. token 回應裡沒有帳號資訊,email 要另外打一次 userinfo 端點拿。
+//  2. token 回應裡沒有帳號資訊,email 要另外打一次 userinfo 端點拿,
+//     Cloud Code project 要再打一次 loadCodeAssist 拿。
 package antigravity
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"runtime"
 	"strings"
 
 	auth "github.com/bizshuk/auth/model"
@@ -60,6 +63,40 @@ const (
 	USERINFO_URL  = "https://www.googleapis.com/oauth2/v2/userinfo"
 	CALLBACK_PORT = "51121"
 	REDIRECT_URI  = "http://localhost:" + CALLBACK_PORT + "/oauth-callback"
+)
+
+// Cloud Code 的帳號開通端點。project 是登入的產物而不是推論參數,所以在這裡
+// 查:它由 Google 在帳號首次使用時配發,之後對該帳號固定不變,而 Antigravity
+// 的每個推論請求都必須把它帶在 body 裡。
+const (
+	LOAD_CODE_ASSIST_HOST = "https://cloudcode-pa.googleapis.com"
+	LOAD_CODE_ASSIST_PATH = "/v1internal:loadCodeAssist"
+	LOAD_CODE_ASSIST_URL  = LOAD_CODE_ASSIST_HOST + LOAD_CODE_ASSIST_PATH
+
+	// LOAD_CODE_ASSIST_MODE 選「解析我的 entitlement」而非開通流程。
+	LOAD_CODE_ASSIST_MODE = 1
+)
+
+// loadCodeAssist 的 client 身分標頭。少了它們 gateway `不會報錯` —— 它照樣回
+// 200,但整包只有 tier 清單、沒有 cloudaicompanionProject,等於查不到 project
+// 卻沒有任何錯誤訊號。這幾個值必須與 Antigravity IDE 自己送的一致。
+const (
+	CLIENT_NAME     = "antigravity"
+	CLIENT_VERSION  = "2.0.1"
+	GOOG_API_CLIENT = "gl-node/18.18.2 fire/0.8.6 grpc/1.10.x"
+)
+
+// gateway 以`數字`讀這些 enum;名稱形式只存在於 IDE 的 protobuf descriptor。
+const (
+	IDE_TYPE_ANTIGRAVITY = 9
+	PLUGIN_TYPE_GEMINI   = 2
+
+	PLATFORM_UNSPECIFIED   = 0
+	PLATFORM_DARWIN_AMD64  = 1
+	PLATFORM_DARWIN_ARM64  = 2
+	PLATFORM_LINUX_AMD64   = 3
+	PLATFORM_LINUX_ARM64   = 4
+	PLATFORM_WINDOWS_AMD64 = 5
 )
 
 // init 把兩個 client 憑證的 viper key 綁到對應的環境變數。
@@ -112,7 +149,8 @@ func NewOAuth(opts ...model.Option) *OAuth {
 func (a *OAuth) Provider() string { return PROVIDER }
 func (a *OAuth) Kind() model.Kind { return model.KIND_OAUTH }
 
-// Login 跑完整的瀏覽器授權流程,再打 userinfo 補上帳號 email。
+// Login 跑完整的瀏覽器授權流程,再打 userinfo 補上帳號 email、
+// 打 loadCodeAssist 補上 Cloud Code project。
 func (a *OAuth) Login(ctx context.Context) (*model.Credential, error) {
 	token, err := svc.RunBrowserLogin(ctx, a.client, a.opts)
 	if err != nil {
@@ -120,12 +158,14 @@ func (a *OAuth) Login(ctx context.Context) (*model.Credential, error) {
 	}
 
 	cred := svc.MergeOAuthToken(PROVIDER, token, nil, SCOPES, a.opts.Now())
-	email, err := a.fetchUserEmail(ctx, cred.AccessToken)
-	if err != nil {
-		// 拿不到 email 不該讓登入失敗 — token 是有效的,只是憑證檔會少個名字。
-		return cred, nil
+	if email, err := a.fetchUserEmail(ctx, cred.AccessToken); err == nil {
+		cred.Account = email
 	}
-	cred.Account = email
+	// 拿不到 email 或 project 都不該讓登入失敗 — token 是有效的,只是憑證檔
+	// 會少個名字或少個 project。
+	if project, err := a.fetchProjectID(ctx, cred.AccessToken); err == nil {
+		cred.ProjectID = project
+	}
 	return cred, nil
 }
 
@@ -228,4 +268,121 @@ func (a *OAuth) fetchUserEmail(ctx context.Context, accessToken string) (string,
 		return "", fmt.Errorf("antigravity: userinfo response has no email")
 	}
 	return payload.Email, nil
+}
+
+// fetchProjectID 用 access token 打 loadCodeAssist 拿 Cloud Code project。
+//
+// project 是`帳號開通`的產物,不是推論參數:它由 Google 在帳號首次使用時配發,
+// 之後對該帳號固定不變。Antigravity 的每個推論請求都必須把它帶在 body 裡,
+// 所以在登入時查一次寫進憑證,呼叫端就不必在每次請求前自己解析。
+func (a *OAuth) fetchProjectID(ctx context.Context, accessToken string) (string, error) {
+	endpoint := LOAD_CODE_ASSIST_URL
+	if a.opts.APIBase != "" {
+		endpoint = strings.TrimSuffix(a.opts.APIBase, "/") + LOAD_CODE_ASSIST_PATH
+	}
+
+	// gateway 以數字讀這幾個 enum;IDE 的 protobuf descriptor 才有名稱形式。
+	body, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"ideType":    IDE_TYPE_ANTIGRAVITY,
+			"platform":   platformEnum(),
+			"pluginType": PLUGIN_TYPE_GEMINI,
+		},
+		"mode": LOAD_CODE_ASSIST_MODE,
+	})
+	if err != nil {
+		return "", fmt.Errorf("antigravity: encode loadCodeAssist request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("antigravity: create loadCodeAssist request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", clientUserAgent())
+	req.Header.Set("X-Client-Name", CLIENT_NAME)
+	req.Header.Set("X-Client-Version", CLIENT_VERSION)
+	req.Header.Set("x-goog-api-client", GOOG_API_CLIENT)
+	svc.BearerAuth(req, accessToken)
+
+	resp, err := a.opts.HTTPClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("antigravity: loadCodeAssist request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("antigravity: read loadCodeAssist response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", &svc.HTTPError{
+			Op:     "antigravity loadCodeAssist",
+			Status: resp.StatusCode,
+			Body:   strings.TrimSpace(string(raw)),
+		}
+	}
+
+	var payload struct {
+		Project json.RawMessage `json:"cloudaicompanionProject"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return "", fmt.Errorf("antigravity: parse loadCodeAssist response: %w", err)
+	}
+	project := decodeProject(payload.Project)
+	if project == "" {
+		// 帳號還沒開通 project 是正常的首次狀態,不是傳輸錯誤。
+		return "", fmt.Errorf("antigravity: loadCodeAssist response has no project")
+	}
+	return project, nil
+}
+
+// decodeProject 解 cloudaicompanionProject 的兩種形狀:開通完成是字串,
+// 開通中則是帶 id 的物件。
+func decodeProject(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		return strings.TrimSpace(asString)
+	}
+	var asObject struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &asObject); err == nil {
+		return strings.TrimSpace(asObject.ID)
+	}
+	return ""
+}
+
+// clientUserAgent 組出 gateway 認得的 IDE 身分字串。Node 把 amd64 叫 x64,
+// gateway 從每個真實 client 看到的都是 Node 的拼法,所以這裡跟著它。
+func clientUserAgent() string {
+	arch := runtime.GOARCH
+	if arch == "amd64" {
+		arch = "x64"
+	}
+	return fmt.Sprintf("%s/%s %s/%s", CLIENT_NAME, CLIENT_VERSION, runtime.GOOS, arch)
+}
+
+// platformEnum 把執行平台對應到 gateway 的 platform enum。
+func platformEnum() int {
+	arm := runtime.GOARCH == "arm64"
+	switch runtime.GOOS {
+	case "darwin":
+		if arm {
+			return PLATFORM_DARWIN_ARM64
+		}
+		return PLATFORM_DARWIN_AMD64
+	case "linux":
+		if arm {
+			return PLATFORM_LINUX_ARM64
+		}
+		return PLATFORM_LINUX_AMD64
+	case "windows":
+		return PLATFORM_WINDOWS_AMD64
+	}
+	return PLATFORM_UNSPECIFIED
 }
