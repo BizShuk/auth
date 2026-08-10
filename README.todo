@@ -1,0 +1,23 @@
+# TODO
+
+> 本清單由 2026-08-10 的 submodule 一致性稽核建立。條目均有可查證的依據，
+> 但`優先序尚未排定` — 請依實際需求增刪。
+
+## 文件同步 (Documentation Sync)
+
+- [ ] 新增 provider 時，`README.md` 的提供者表、`provider.ROUTES`、
+      `docs/terminology.md` 的認證流程節必須同步更新。目前無機制保證三者一致，
+      考慮加一個測試：走訪 `provider.IDs()` 並斷言每個 ID 在文件表中都有一列。
+
+## 測試 (Testing)
+
+- [ ] `provider/<name>/` 六個套件（anthropic、antigravity、google、openai、
+      vertex、xai）承載 9 個 provider ID，但 `Verify` 的憑證輪替路徑
+      （`VerifyResult.Credential != nil` → 呼叫端必須寫回）沒有跨 provider 的
+      共通測試。輪替沒寫回是靜默失效，值得一個 table-driven 測試釘住。
+
+## 已知風險 (Known Risks)
+
+- [ ] `openai_oauth` 每次 refresh 都會輪替 refresh token。`svc/oauth.go` 已實作
+      single-flight（見 `TestOAuthClientRefreshSingleFlight`），但`跨行程`
+      併發（CLI 與 SDK 同時執行）不在其保護範圍內。需確認是否要加檔案鎖。
