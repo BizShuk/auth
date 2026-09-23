@@ -1,10 +1,9 @@
 # TODO
 
-> 本清單由 2026-08-10 的 submodule 一致性稽核建立。條目均有可查證的依據，
-> 但`優先序尚未排定` — 請依實際需求增刪。
+> 本清單由 2026-08-10 的 submodule 一致性稽核建立。條目均有可查證的依據。
 
-## 文件同步 (Documentation Sync)
+## Architecture
 
-- [ ] 新增 provider 時，`README.md` 的提供者表、`provider.ROUTES`、
-      `docs/terminology.md` 的認證流程節必須同步更新。目前無機制保證三者一致，
-      考慮加一個測試：走訪 `provider.IDs()` 並斷言每個 ID 在文件表中都有一列。
+- [ ] [P1] [chore] 新增 provider 時，`README.md` 的提供者表、`provider.ROUTES`、`docs/terminology.md` 的認證流程節必須同步更新。目前無機制保證三者一致，考慮加一個測試：走訪 `provider.IDs()` 並斷言每個 ID 在文件表中都有一列。
+
+## Archive
