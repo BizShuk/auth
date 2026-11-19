@@ -7,7 +7,6 @@
     "dev": "go run .",
     "test": "go test ./...",
     "build": "go build -o bin/auth .",
-    "deploy": "go install .",
     "install": "go install .",
     "lint": "gofmt -l . && go vet ./...",
     "clean": "rm -rf bin"
