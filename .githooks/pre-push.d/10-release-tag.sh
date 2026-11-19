@@ -7,7 +7,6 @@
 #
 #   - 目前最高的 v<major>.<minor>.<patch> tag 的下一個 patch。
 #   - package.json 的 version（若存在）。
-#   - .claude-plugin/plugin.json 的 version（若存在）。
 #
 # Manifest 只讀不寫；版本必須是不含 prerelease 或 build metadata 的
 # <major>.<minor>.<patch>。
@@ -36,7 +35,6 @@ set -uo pipefail
 readonly TAG_PREFIX="v"
 readonly TAG_GLOB="v[0-9]*"
 readonly PACKAGE_FILE="package.json"
-readonly PLUGIN_FILE=".claude-plugin/plugin.json"
 
 # 只有推這個 branch 才打 release tag。feature branch 不該產生 release tag，
 # 尤其這個 tag 會被立刻推上公開 remote。
@@ -105,7 +103,7 @@ next_release_tag() {
 	highest="$(highest_tag_version)"
 	selected="$(next_patch_version "$highest")" || return 1
 
-	for manifest in "$PACKAGE_FILE" "$PLUGIN_FILE"; do
+	for manifest in "$PACKAGE_FILE"; do
 		[[ -f "$manifest" ]] || continue
 		if candidate="$(manifest_version "$manifest")"; then
 			if version_greater_than "$candidate" "$selected"; then
